@@ -1,7 +1,6 @@
 import { MenuItem as RemoteMenuItem } from '@electron/remote'
 import log from 'electron-log'
 import bus from '@/bus'
-import { getLanguageName } from '@/spellchecker/languageMap'
 import { SEPARATOR } from './menuItems'
 
 /**
@@ -17,23 +16,11 @@ export default (spellchecker, selectedWord, wordSuggestions, replaceCallback) =>
   if (spellchecker && spellchecker.isEnabled) {
     const spellingSubmenu = []
 
-    // Change language menu entries
-    const currentLanguage = spellchecker.lang
-    const availableDictionaries = spellchecker.getAvailableDictionaries()
-    const availableDictionariesSubmenu = []
-    for (const dict of availableDictionaries) {
-      availableDictionariesSubmenu.push(new RemoteMenuItem({
-        label: getLanguageName(dict),
-        enabled: dict !== currentLanguage,
-        click () {
-          bus.$emit('switch-spellchecker-language', dict)
-        }
-      }))
-    }
-
     spellingSubmenu.push(new RemoteMenuItem({
       label: 'Change Language...',
-      submenu: availableDictionariesSubmenu
+      click () {
+        bus.$emit('open-command-spellchecker-switch-language')
+      }
     }))
 
     spellingSubmenu.push(SEPARATOR)

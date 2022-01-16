@@ -13,8 +13,9 @@ class ClickEvent {
   contextClickBingding () {
     const { container, eventCenter, contentState } = this.muya
     const handler = event => {
-      event.preventDefault()
-      event.stopPropagation()
+      // NOTE: Allow native context menu in MarkText.
+      // event.preventDefault()
+      // event.stopPropagation()
 
       // Hide all float box and image transformer
       const { keyboard } = this.muya

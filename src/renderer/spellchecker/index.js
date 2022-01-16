@@ -1,15 +1,5 @@
-import fs from 'fs'
-import path from 'path'
-import os from 'os'
-import { SpellCheckHandler, fallbackLocales, normalizeLanguageCode } from '@hfelix/electron-spellchecker'
-import { isDirectory, isFile } from 'common/filesystem'
-import { cloneObj, isOsx, isLinux, isWindows } from '@/util'
-
-// NOTE: Hardcoded in "@hfelix/electron-spellchecker/src/spell-check-handler.js"
-export const getDictionaryPath = () => {
-  const { userDataPath } = global.marktext.paths
-  return path.join(userDataPath, 'dictionaries')
-}
+import { ipcRenderer, webFrame } from 'electron'
+import { deepClone, isOsx } from '@/util'
 
 // Source: https://github.com/Microsoft/vscode/blob/master/src/vs/editor/common/model/wordHelper.ts
 // /(-?\d*\.\d\w*)|([^\`\~\!\@\#\$\%\^\&\*\(\)\-\=\+\[\{\]\}\\\|\;\:\'\"\,\.\<\>\/\?\s]+)/
@@ -30,8 +20,8 @@ const WORD_DEFINITION = /(?:-?\d*\.\d\w*)|(?:[^`~!@#$%^&*()-=+[{\]}\\|;:'",\.<>\
  */
 export const offsetToWordCursor = (lineCursor, left, right) => {
   // Deep clone cursor start and end
-  const start = cloneObj(lineCursor.start, true)
-  const end = cloneObj(lineCursor.end, true)
+  const start = deepClone(lineCursor.start)
+  const end = deepClone(lineCursor.end)
   start.offset = left
   end.offset = right
   return { start, end }
@@ -70,213 +60,82 @@ export const validateLineCursor = selection => {
 }
 
 /**
- * Returns a list of local available Hunspell dictionaries.
- *
- * @returns {string[]} List of available Hunspell dictionary language codes.
- */
-export const getAvailableHunspellDictionaries = () => {
-  const dictionaryPath = getDictionaryPath()
-  const dict = []
-  // Search for dictionaries on filesystem.
-  if (isDirectory(dictionaryPath)) {
-    fs.readdirSync(dictionaryPath).forEach(filename => {
-      const fullname = path.join(dictionaryPath, filename)
-      const match = filename.match(/^([a-z]{2}(?:[-][A-Z]{2})?)\.bdic$/)
-      if (match && match[1] && isFile(fullname)) {
-        dict.push(match[1])
-      }
-    })
-  }
-  return dict
-}
-
-export const isOsSpellcheckerSupported = () => {
-  let envOverwrite = !!process.env['SPELLCHECKER_PREFER_HUNSPELL'] // eslint-disable-line dot-notation
-  if (isLinux || envOverwrite) {
-    return false
-  } else if (isOsx) {
-    return true
-  } else if (isWindows) {
-    // NOTE: Normally we need to initialize the spellchecker and check the result.
-    const windowsVersion = os.release().match(/^(\d+)\./)
-    if (windowsVersion && windowsVersion[1]) {
-      const windowsMajor = Number(windowsVersion[1])
-      if (windowsMajor >= 10) {
-        return true
-      }
-    }
-  }
-  return false
-}
-
-/**
- * High level spell checker API.
- *
- * Language providers:
- *  - macOS: NSSpellChecker (default) or Hunspell
- *  - Linux and Windows: Hunspell
+ * High level spell checker API based on Chromium built-in spell checker.
  */
 export class SpellChecker {
   /**
    * ctor
    *
-   * @param {boolean} enabled Whether spell checking is enabled.
+   * @param {boolean} enabled Whether spell checking is enabled in settings.
    */
-  constructor (enabled = true) {
-    // Hunspell is used on Linux and Windows but macOS can use Hunspell if prefered.
-    this.isHunspell = !isOsSpellcheckerSupported() || !!process.env['SPELLCHECKER_PREFER_HUNSPELL'] // eslint-disable-line dot-notation
+  constructor (enabled = true, lang) {
+    this.enabled = enabled
+    this.currentSpellcheckerLanguage = lang
 
-    // Initialize spell check provider. If spell check is not enabled don't
-    // initialize the handler to not load the native module.
-    if (enabled) {
-      this._initHandler()
-    } else {
-      this.provider = null
-      this.fallbackLang = null
-      this.isEnabled = false
-      this.isInitialized = false
-    }
-  }
-
-  _initHandler () {
-    if (this.isInitialized) {
-      throw new Error('Invalid state.')
-    }
-
-    this.provider = new SpellCheckHandler(getDictionaryPath())
-    this.isHunspell = this.provider.isHunspell
-
-    // The spell checker is now initialized but not yet enabled. You need to call `init`.
-    this.isEnabled = false
-    this.isInitialized = true
+    // Helper to forbid the usage of the spell checker (e.g. failed to create native spell checker),
+    // even if spell checker is enabled in settings.
+    this.isProviderAvailable = true
   }
 
   /**
-   * Initialize the spell checker and attach it to the window.
-   *
-   * @param {string} lang 4-letter language ISO-code.
-   * @param {boolean} automaticallyIdentifyLanguages Whether we should try to identify the typed language.
-   * @param {boolean} isPassiveMode Should we highlight misspelled words?
-   * @param {[HTMLElement]} container The optional container to attach the automatic spell detection when
-   *                                  using Hunspell. Default `document.body`.
-   * @returns {string} Returns current spell checker language.
+   * Whether the spell checker is available and enabled.
    */
-  async init (lang = '', automaticallyIdentifyLanguages = false, isPassiveMode = false, container = null) {
-    if (this.isEnabled) {
-      return
-    } else if (!this.isInitialized) {
-      this._initHandler()
-    }
-
-    if (!lang && !automaticallyIdentifyLanguages) {
-      throw new Error('Init: Either language or automatic language detection must be set.')
-    }
-
-    // TODO(spell): Language detection is currently unavailable when another
-    //   spell checker than the macOS spell checker is used because Node worker
-    //   threads doesn't work in Electron (Electon#18540).
-    if (this.isHunspell || !isOsx) {
-      automaticallyIdentifyLanguages = false
-    }
-
-    // This just set a variable when using Hunspell and switch the spell checker mode
-    // when using macOS spell checker. Calling switchLanguage after this using macOS
-    // spell checker will deactivate automatic language detection.
-    this.provider.automaticallyIdentifyLanguages =
-      automaticallyIdentifyLanguages || (!this.isHunspell && !lang)
-
-    // If true, don't highlight misspelled words. Just like above, this method only
-    // affect the macOS spell checker.
-    this.provider.isPassiveMode = isPassiveMode
-
-    if (!this.isHunspell && (automaticallyIdentifyLanguages || !lang)) {
-      // Attach the spell checker to the our editor.
-      // NOTE: Calling this method is normally not necessary on macOS with
-      // OS spell checker.
-      this.provider.attachToInput(container)
-
-      this.fallbackLang = null
-      this.isEnabled = true
-      return this.lang
-    }
-
-    if (!lang) {
-      // Set to Hunspell fallback language.
-      lang = 'en-US'
-    }
-
-    // We have to call our switch language method to ensure that the provider is in a valid state.
-    const currentLang = await this._switchLanguage(lang)
-    if (!currentLang) {
-      throw new Error(`Language "${lang}" is not available.`)
-    }
-
-    // Attach the spell checker to the our editor.
-    this.provider.attachToInput(container)
-    this.fallbackLang = currentLang
-    this.isEnabled = true
-    return currentLang
+  get isEnabled () {
+    return this.isProviderAvailable && this.enabled
   }
 
   /**
-   * Enable spell checker.
+   * Enable the spell checker and sets `lang` or tries to find a fallback.
    *
-   * NOTE: Using `undefined` will use the existing values.
-   * NOTE: When spell checker is already enabled this method has no effect.
-   *
-   * @param {[string]} lang 4-letter language ISO-code.
-   * @param {[boolean]} automaticallyIdentifyLanguages Whether we should try to identify the typed language.
-   * @param {[boolean]} isPassiveMode Should we highlight misspelled words?
+   * @param {string} lang The language to set.
+   * @returns {Promise<boolean>}
    */
-  async enableSpellchecker (lang = undefined, automaticallyIdentifyLanguages = undefined, isPassiveMode = undefined) {
-    if (this.isEnabled) {
-      return true
+  async activateSpellchecker (lang) {
+    try {
+      this.enabled = true
+      this.isProviderAvailable = true
+      const success = await this.switchLanguage(lang || this.currentSpellcheckerLanguage)
+      return success
+    } catch (error) {
+      this.deactivateSpellchecker()
+      throw error
     }
-
-    const result = await this.provider.enableSpellchecker(
-      lang,
-      automaticallyIdentifyLanguages,
-      isPassiveMode
-    )
-    if (!result) {
-      // Spell checker may be in an invalid state and don't try to recover.
-      this.disableSpellchecker()
-      return false
-    }
-
-    this.fallbackLang = this.lang
-    this.isEnabled = true
-    return true
   }
 
   /**
-   * Disable spell checker.
+   * Disables the native spell checker.
    */
-  disableSpellchecker () {
-    if (!this.isEnabled) {
-      return
-    }
-
-    this.provider.disableSpellchecker()
-    this.isEnabled = false
+  deactivateSpellchecker () {
+    this.enabled = false
+    this.isProviderAvailable = false
+    ipcRenderer.send('mt::spellchecker-set-enabled', false)
   }
 
   /**
    * Add a word to the user dictionary.
    *
    * @param {string} word The word to add.
+   * @returns {Promise<boolean>} Whether the word was added.
+   *
    */
   async addToDictionary (word) {
-    return await this.provider.addToDictionary(word)
+    if (!this.isEnabled) {
+      return false
+    }
+    return ipcRenderer.invoke('mt::spellchecker-add-word', word)
   }
 
   /**
    * Remove a word frome the user dictionary.
    *
    * @param {string} word The word to remove.
+   * @returns {Promise<boolean>} Whether the word was removed.
    */
   async removeFromDictionary (word) {
-    return await this.provider.removeFromDictionary(word)
+    if (!this.isEnabled) {
+      return false
+    }
+    return ipcRenderer.invoke('mt::spellchecker-remove-word', word)
   }
 
   /**
@@ -285,105 +144,22 @@ export class SpellChecker {
    * @param {string} word The word to ignore.
    */
   ignoreWord (word) {
-    this.provider.ignoreWord(word)
-  }
-
-  /**
-   * Returns a list of available dictionaries.
-   * @returns {string[]} Available dictionary languages.
-   */
-  getAvailableDictionaries () {
-    // NOTE: We only receive the dictionaries when the spellchecker is active
-    // on macOS! Therefore be consistent.
-    if (!this.provider.currentSpellchecker) {
-      return []
-    }
-
-    if (!this.isHunspell) {
-      // NOTE: OS X will return lists that are half just a language, half
-      // language + locale, like ['en', 'pt_BR', 'ko'] and Windows also returns
-      // BCP-47 ones.
-      return this.provider.currentSpellchecker.getAvailableDictionaries()
-        .map(x => {
-          if (x.length === 2) return fallbackLocales[x]
-          try {
-            return normalizeLanguageCode(x)
-          } catch (_) {
-            return null
-          }
-        })
-        .filter(x => { return !!x })
-    }
-
-    // Load hunspell dictionaries from disk.
-    return getAvailableHunspellDictionaries()
-  }
-
-  /**
-   * Is the spellchecker trying to detect the typed language automatically?
-   */
-  get automaticallyIdentifyLanguages () {
-    if (!this.isEnabled) {
-      return false
-    }
-    return this.provider.automaticallyIdentifyLanguages
-  }
-
-  /**
-   * Is the spellchecker trying to detect the typed language automatically?
-   */
-  set automaticallyIdentifyLanguages (value) {
-    if (!this.isEnabled) {
-      return
-    }
-
-    // TODO(spell): Language detection is currently unavailable when another
-    //   spell checker than the macOS spell checker is used because Node worker
-    //   threads doesn't work in Electron (Electon#18540).
-    if (this.isHunspell || !isOsx) {
-      value = false
-    }
-    this.provider.automaticallyIdentifyLanguages = !!value
-  }
-
-  /**
-   * Returns true if not misspelled words should be highlighted.
-   */
-  get isPassiveMode () {
-    if (!this.isEnabled) {
-      return false
-    }
-    return this.provider.isPassiveMode
-  }
-
-  /**
-   * Should we highlight misspelled words.
-   */
-  set isPassiveMode (value) {
-    if (!this.isEnabled) {
-      return
-    }
-    this.provider.isPassiveMode = !!value
+    // TODO(spell): No longer needed because we cannot manipulate Chromiums spell checker. Remove this.
+    return false
   }
 
   /**
    * Return the current language.
    */
-  get lang () {
-    if (!this.provider) {
-      return ''
+   get lang () {
+    if (this.isEnabled) {
+      return this.currentSpellcheckerLanguage
     }
-    return this.provider.currentSpellcheckerLanguage
+    return ''
   }
 
-  /**
-   * Whether the spell checker is in an invalid state and therefore deactivated.
-   */
-  get isInvalidState () {
-    if (!this.provider) {
-      return false
-    }
-    return this.provider.invalidState
+  set lang (lang) {
+    this.currentSpellcheckerLanguage = lang
   }
 
   /**
@@ -392,20 +168,23 @@ export class SpellChecker {
    * NOTE: This function can throw an exception.
    *
    * @param {string} lang The language code
-   * @returns {string|null} Return the language on success or null.
+   * @returns {Promise<boolean>} Return the language on success or null.
    */
   async switchLanguage (lang) {
-    if (!this.isEnabled) {
-      throw new Error('Invalid state: spell checker is disabled.')
+    if (isOsx) {
+      // NB: On macOS the OS spell checker is used and will detect the language automatically.
+      return true
     } else if (!lang) {
-      throw new Error('Invalid language.')
+      throw new Error('Invalid empty language.')
+    } else if (this.isEnabled) {
+      const errorMsg = await ipcRenderer.invoke('mt::spellchecker-switch-language', lang)
+      if (errorMsg) {
+        throw new Error(errorMsg)
+      }
+      this.lang = lang
+      return true
     }
-
-    const currentLang = await this._switchLanguage(lang)
-    if (currentLang) {
-      this.fallbackLang = currentLang
-    }
-    return currentLang
+    return false
   }
 
   /**
@@ -414,23 +193,39 @@ export class SpellChecker {
    * @param {string} word The word to check.
    */
   isMisspelled (word) {
-    if (!this.isEnabled) {
-      return false
+    // TODO(spell): Move to main because `webFrame.getWordSuggestions` and `webFrame.isWordMisspelled`
+    //              doesn't work on Windows (Electron#28684). Remove this.
+    if (this.isEnabled) {
+      return webFrame.isWordMisspelled(word)
     }
-    return this.provider.isMisspelled(word)
+    return false
   }
 
   /**
    * Get corrections.
    *
    * @param {string} word The word to get suggestion for.
-   * @returns {string[]} A array of suggestions.
+   * @returns {Promise<string[]>} An array of suggestions.
    */
   async getWordSuggestion (word) {
-    if (!this.isMisspelled(word)) {
+    // TODO(spell): Move to main because `webFrame.getWordSuggestions` and `webFrame.isWordMisspelled`
+    //              doesn't work on Windows (Electron#28684). Remove this.
+    if (this.isEnabled) {
+      return webFrame.getWordSuggestions(word)
+    }
+    return []
+  }
+
+  /**
+   * Returns a list of available dictionaries.
+   * @returns {Promise<string[]>} Available dictionary languages.
+   */
+   static async getAvailableDictionaries () {
+    if (isOsx) {
+      // NB: On macOS the OS spell checker is used and will detect the language automatically.
       return []
     }
-    return await this.provider.getCorrectionsForMisspelling(word)
+    return ipcRenderer.invoke('mt::spellchecker-get-available-dictionaries')
   }
 
   /**
@@ -490,46 +285,5 @@ export class SpellChecker {
       right: right,
       word: text.slice(left, right)
     }
-  }
-
-  /**
-   * @private
-   * @param {string} lang The language code
-   * @returns {string|null} Return the language on success or null.
-   */
-  async _switchLanguage (lang) {
-    const result = await this.provider.switchLanguage(lang)
-    if (!result) {
-      return await this._tryRecover()
-    }
-    return this.lang
-  }
-
-  /**
-   * Try to recover the spell checker's invalid state.
-   *
-   * @returns {string|null} Return the language on success or null.
-   */
-  async _tryRecover () {
-    const lang = this.fallbackLang
-    if (lang) {
-      // Prevent rekursiv loop.
-      this.fallbackLang = null
-
-      // Try fallback language.
-      const result = await this._switchLanguage(lang)
-      if (result) {
-        this.fallbackLang = lang
-        return lang
-      }
-
-      // Spell checker is deactivated from rekursiv call.
-      return null
-    }
-
-    // Spell checker is in an invalid state. We can recover it by enabling
-    // with a valid language.
-    this.disableSpellchecker()
-    return null
   }
 }

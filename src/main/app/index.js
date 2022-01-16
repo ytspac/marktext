@@ -11,7 +11,7 @@ import { normalizeAndResolvePath } from '../filesystem'
 import { normalizeMarkdownPath } from '../filesystem/markdown'
 import { selectTheme } from '../menu/actions/theme'
 import { dockMenu } from '../menu/templates'
-import ensureDefaultDict from '../preferences/hunspell'
+import registerSpellcheckerListeners from '../spellchecker'
 import { watchers } from '../utils/imagePathAutoComplement'
 import { WindowType } from '../windows/base'
 import EditorWindow from '../windows/editor'
@@ -111,13 +111,6 @@ class App {
         return { action: 'deny' }
       })
     })
-
-    // Copy default (en-US) Hunspell dictionary.
-    const { paths } = this._accessor
-    ensureDefaultDict(paths.userDataPath)
-      .catch(error => {
-        log.error('Error copying Hunspell dictionary: ', error)
-      })
   }
 
   async getScreenshotFileName () {
@@ -427,6 +420,8 @@ class App {
   }
 
   _listenForIpcMain () {
+    registerSpellcheckerListeners()
+
     ipcMain.on('app-create-editor-window', () => {
       this._createEditorWindow()
     })
