@@ -184,7 +184,6 @@ Names and company logos of all sponsors (from both Patreon and Open Collective) 
 | Graphite Light                                    | Material Dark                                   |
 | ![](docs/themeImages/graphite-light.png?raw=true) | ![](docs/themeImages/materal-dark.png?raw=true) |
 | Ulysses Light                                     | One Dark                                        |
-| ![](docs/themeImages/ulysses-light.png?raw=true)  | ![](docs/themeImages/one-dark.png?raw=true)     |
 
 <h4 align="center">:smile_cat:Edit modes:dog:</h4>
 
